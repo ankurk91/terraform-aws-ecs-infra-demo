@@ -1,0 +1,20 @@
+# Set the default behavior to automatically normalize line endings
+* text=auto
+
+# Terraform files
+*.tf text
+*.tfstate text
+*.tfstate.backup text
+*.tfvars text
+*.tfplan text
+
+# Ignore binary files
+*.zip binary
+*.tar.gz binary
+*.tgz binary
+
+*.tf merge=union
+
+*.tf diff=terraform
+
+.terraform.lock.hcl text

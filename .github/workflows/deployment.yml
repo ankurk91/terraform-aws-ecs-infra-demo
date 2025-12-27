@@ -1,0 +1,122 @@
+name: deployment
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - dev
+      - staging
+      - prod
+  pull_request:
+    branches:
+      - '*'
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+env:
+  TF_AWS_PROFILE: cosmic
+
+jobs:
+  deployment:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "^1.14"
+
+      - name: Configure Terraform plugin cache
+        run: |
+          echo "TF_PLUGIN_CACHE_DIR=$HOME/.terraform.d/plugin-cache" >>"$GITHUB_ENV"
+          mkdir --parents "$HOME/.terraform.d/plugin-cache"
+
+      - name: Cache Terraform plugin
+        uses: actions/cache@v4
+        with:
+          path: ~/.terraform.d/plugin-cache
+          key: terraform-${{ runner.os }}-${{ hashFiles('**/.terraform.lock.hcl') }}
+          restore-keys: terraform-${{ runner.os }}-
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ASSUME_ROLE_ARN }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ vars.AWS_REGION }}
+          retry-max-attempts: 2
+
+      - name: Create a new AWS Profile
+        run: |
+          aws configure set aws_access_key_id ${{ env.AWS_ACCESS_KEY_ID }} --profile ${{ env.TF_AWS_PROFILE }}
+          aws configure set aws_secret_access_key ${{ env.AWS_SECRET_ACCESS_KEY }} --profile ${{ env.TF_AWS_PROFILE }}
+          aws configure set aws_session_token ${{ env.AWS_SESSION_TOKEN }} --profile ${{ env.TF_AWS_PROFILE }}
+          echo "AWS profile created successfully."
+
+      - name: Verify AWS CLI
+        run: aws sts get-caller-identity --profile ${{ env.TF_AWS_PROFILE }}
+
+      - name: Init Terraform
+        run: terraform init -lockfile=readonly -input=false
+
+      - name: Validate terraform code
+        run: terraform validate
+
+      - name: Set environment variables
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          set -euo pipefail
+
+          case "${GITHUB_REF_NAME}" in
+            "dev")
+              BACKEND_APP_DOMAIN="${{ vars.DEV_BACKEND_APP_DOMAIN }}"
+              DNS_RECORDS_UPDATED="${{ vars.DEV_DNS_RECORDS_UPDATED }}"
+              ;;
+            "staging")
+              BACKEND_APP_DOMAIN="${{ vars.STAGING_BACKEND_APP_DOMAIN }}"
+              DNS_RECORDS_UPDATED="${{ vars.STAGING_DNS_RECORDS_UPDATED }}"
+              ;;
+            "prod")
+              BACKEND_APP_DOMAIN="${{ vars.PROD_BACKEND_APP_DOMAIN }}"
+              DNS_RECORDS_UPDATED="${{ vars.PROD_DNS_RECORDS_UPDATED }}"
+              ;;
+            *)
+              echo "ERROR: Branch not matched. Exiting."
+              exit 1
+              ;;
+          esac
+
+          echo "BACKEND_APP_DOMAIN=${BACKEND_APP_DOMAIN}" >> $GITHUB_ENV
+          echo "DNS_RECORDS_UPDATED=${DNS_RECORDS_UPDATED}" >> $GITHUB_ENV
+
+          echo "Environment variables set successfully."
+
+      - name: Prepare Terraform workspace
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          set -euo pipefail
+          terraform workspace select ${{ github.ref_name }} || terraform workspace new ${{ github.ref_name }}
+          terraform workspace list
+
+      - name: Terraform apply
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          TF_VAR_aws_region: ${{ vars.AWS_REGION }}
+          TF_VAR_alert_notification_emails: ${{ vars.ALERT_NOTIFICATION_EMAILS }}
+          TF_VAR_project_name: "cosmic"
+
+          TF_VAR_mongo_org_id: ${{ secrets.MONGO_DB_ORG_ID }}
+          TF_VAR_mongo_public_key: ${{ secrets.MONGO_DB_PUBLIC_KEY }}
+          TF_VAR_mongo_private_key: ${{ secrets.MONGO_DB_PRIVATE_KEY }}
+
+          TF_VAR_backend_app_domain: ${{ env.BACKEND_APP_DOMAIN }}
+          TF_VAR_s3_suffix_domain: ${{ vars.S3_SUFFIX_DOMAIN }}
+          TF_VAR_dns_records_updated: ${{ env.DNS_RECORDS_UPDATED }}
+        run: terraform apply -input=false -auto-approve
