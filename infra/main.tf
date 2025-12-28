@@ -52,7 +52,7 @@ module "mongo-backend-db" {
   public_key = var.mongo_public_key
   db_user_password = var.mongo_db_user_password
   region = upper(replace(var.aws_region, "-", "_"))
-  ip_addresses = [module.network.nat_gateway_public_ip]
+  ip_addresses = ["127.0.0.1"]
 }
 
 module "ses" {
